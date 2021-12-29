@@ -23,11 +23,11 @@ fn get(l: LuaState) -> i32 {
 	let state = STATE.load(Ordering::Relaxed);
 
 	if let Some(state) = unsafe { state.as_ref() } {
-		match unsafe { state.get() } {
+		match unsafe { state.particles.get( state.solver ) } {
 			Some(data) => printgm!(l, "{:#?}", data),
 			None => printgm!(l, "Couldn't get data."),
 		}
-		state.unmap();
+		state.particles.unmap();
 	}
 
 	0
@@ -39,7 +39,7 @@ pub fn get_particles(l: LuaState) -> i32 {
 
 	match unsafe { state.as_ref() } {
 		Some(state) => {
-			if let Some(data) = unsafe { state.get() } {
+			if let Some(data) = unsafe { state.particles.get(state.solver) } {
 				lua_createtable(l, data.len() as i32, 0);
 				for (i, particle) in data.iter().enumerate() {
 					lua_createtable(l, 0, 4); // -3 particle = {}
@@ -84,7 +84,7 @@ pub fn get_particles(l: LuaState) -> i32 {
 				}
 				return 1;
 			}
-			state.unmap();
+			state.particles.unmap();
 			0
 		}
 		None => 0,

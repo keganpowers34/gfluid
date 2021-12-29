@@ -1,6 +1,6 @@
 [package]
 name = "gfluid"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Vurv78 <vurvdevelops@gmail.com>"]
 edition = "2021"
 publish = false

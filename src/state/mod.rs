@@ -12,55 +12,41 @@ use nvflex_sys::*;
 mod geometry;
 use geometry::GeometryState;
 
+mod particle;
+use particle::ParticleState;
+
 #[derive(Debug)]
-pub struct FlexState<'a> {
+pub struct FlexState {
 	/* Shared */
 	initialized: bool,
 	instant: Instant,
 	lib: *mut NvFlexLibrary,
 
-	/* Particles */
-	nactive: i32,
-	pub particles: Vec<Particle<'a>>,
-
 	/// Note this will most likely be null.
 	desc: *mut NvFlexInitDesc,
-	/// Note this will also most likely be null.
+
 	solver_desc: MaybeUninit<NvFlexSolverDesc>,
-
 	pub solver: *mut NvFlexSolver,
-	pub particle_buffer: *mut NvFlexBuffer,
-	pub velocity_buffer: *mut NvFlexBuffer,
-	pub phase_buffer: *mut NvFlexBuffer,
-	pub active_buffer: *mut NvFlexBuffer,
 
-	/* Geometry */
+	pub particles: ParticleState,
 	pub geometry: GeometryState,
 }
 
-impl<'a> Default for FlexState<'a> {
+impl Default for FlexState {
 	fn default() -> Self {
 		Self {
-			/* Shared */
 			initialized: false,
 			instant: Instant::now(),
 			lib: std::ptr::null_mut(),
 
-			/* Particles */
-			nactive: config::MAX_PARTICLES,
-			particles: vec![],
-
 			desc: std::ptr::null_mut(),
-			solver_desc: MaybeUninit::uninit(),
 
+			solver_desc: MaybeUninit::uninit(),
 			solver: std::ptr::null_mut(),
 
-			particle_buffer: std::ptr::null_mut(),
-			velocity_buffer: std::ptr::null_mut(),
-			phase_buffer: std::ptr::null_mut(),
-			active_buffer: std::ptr::null_mut(),
+			/* Separate States */
 
-			/* Geometry */
+			particles: ParticleState::default(),
 			geometry: GeometryState::default(),
 		}
 	}
@@ -75,7 +61,7 @@ pub enum InitError {
 #[derive(Debug, thiserror::Error)]
 pub enum ShutdownError {}
 
-impl<'a> FlexState<'a> {
+impl FlexState {
 	pub fn new() -> Self {
 		Self::default()
 	}
@@ -94,41 +80,11 @@ impl<'a> FlexState<'a> {
 
 			self.solver = NvFlexCreateSolver(flex, self.solver_desc.as_ptr());
 
-			// TODO: Move this into another part that flushes and allocates like how GeometryState does right now
-			// ParticleState?
-
-			self.particle_buffer = NvFlexAllocBuffer(
-				flex,
-				self.nactive,
-				size_of::<Vector4>() as i32,
-				eNvFlexBufferHost,
-			);
-			self.velocity_buffer = NvFlexAllocBuffer(
-				flex,
-				self.nactive,
-				size_of::<Vector3>() as i32,
-				eNvFlexBufferHost,
-			);
-			self.phase_buffer = NvFlexAllocBuffer(
-				flex,
-				self.nactive,
-				size_of::<i32>() as i32,
-				eNvFlexBufferHost,
-			);
-			self.active_buffer = NvFlexAllocBuffer(
-				flex,
-				self.nactive,
-				size_of::<i32>() as i32,
-				eNvFlexBufferHost,
-			);
+			self.particles = ParticleState::default();
+			self.particles.alloc(flex);
 
 			self.geometry = GeometryState::default();
 			self.geometry.alloc(flex);
-
-			let particles = NvFlexMap(self.particle_buffer, eNvFlexMapWait) as *mut Vector4;
-			let velocities = NvFlexMap(self.velocity_buffer, eNvFlexMapWait) as *mut Vector3;
-			let phases = NvFlexMap(self.phase_buffer, eNvFlexMapWait) as *mut i32;
-			let active = NvFlexMap(self.active_buffer, eNvFlexMapWait) as *mut i32;
 
 			let baux = NvFlexCollisionGeometry {
 				box_: NvFlexBoxGeometry {
@@ -160,29 +116,24 @@ impl<'a> FlexState<'a> {
 
 			let fluid = NvFlexMakePhase(0, eNvFlexPhaseSelfCollide | eNvFlexPhaseFluid);
 
-			for i in 0..self.nactive {
-				let ind = i as isize;
-				particles
-					.offset(ind)
-					.write(Vector4(50.0 * i as f32, 0.0, 5000.0, 2.0));
+			self.particles.factory(|mut x| {
+				for i in 0 .. config::MAX_PARTICLES {
+					x.create(
+						Vector4(50.0 * i as f32, 0.0, 5000.0, 2.0),
+						Vector3(0.0, 0.0, -5.0),
+						fluid,
+						true
+					);
+				}
+			});
 
-				velocities.offset(ind).write(Vector3(0.0, 0.0, -5.0));
-				phases.offset(ind).write(fluid);
-				active.offset(ind).write(i);
-			}
-
-			// Unmap to transfer data to GPU
-			self.unmap();
+			// Unmap here
 
 			// Transfer data
 			NvFlexSetParams(self.solver, &config::PARAMS);
-			NvFlexSetParticles(self.solver, self.particle_buffer, std::ptr::null_mut());
-			NvFlexSetVelocities(self.solver, self.velocity_buffer, std::ptr::null_mut());
-			NvFlexSetPhases(self.solver, self.phase_buffer, std::ptr::null_mut());
-			NvFlexSetActive(self.solver, self.active_buffer, std::ptr::null_mut());
-			NvFlexSetActiveCount(self.solver, self.nactive);
 
-			// This will call SetShapes
+			// This will call all of the NvFlexSet* functions
+			self.particles.flush(self.solver);
 			self.geometry.flush(self.solver);
 
 			self.lib = flex;
@@ -191,15 +142,6 @@ impl<'a> FlexState<'a> {
 		self.initialized = true;
 
 		Ok(self)
-	}
-
-	pub fn unmap(&self) {
-		unsafe {
-			NvFlexUnmap(self.velocity_buffer);
-			NvFlexUnmap(self.particle_buffer);
-			NvFlexUnmap(self.phase_buffer);
-			NvFlexUnmap(self.active_buffer);
-		}
 	}
 
 	pub fn tick(&mut self) {
@@ -211,67 +153,22 @@ impl<'a> FlexState<'a> {
 		}
 	}
 
-	/// Gets a pointer to the particle buffer
-	/// # Safety
-	/// This function must be followed by a proper release, through self.unmap(), as this calls NvFlexMap
-	pub unsafe fn get_particles(&self) -> *mut Vector4 {
-		NvFlexGetParticles(self.solver, self.particle_buffer, std::ptr::null());
-
-		NvFlexMap(self.particle_buffer, eNvFlexMapWait) as *mut Vector4
-	}
-
-	/// # Safety
-	/// This function must be followed by a proper release, through self.unmap(), as this calls NvFlexMap
-	pub unsafe fn get_velocities(&self) -> *mut Vector3 {
-		NvFlexGetVelocities(self.solver, self.velocity_buffer, std::ptr::null());
-
-		NvFlexMap(self.velocity_buffer, eNvFlexMapWait) as *mut Vector3
-	}
-
-	/// # Safety
-	/// This function must be followed by a proper release, through self.unmap(), as this calls NvFlexMap
-	pub unsafe fn get_phases(&self) -> *mut i32 {
-		NvFlexGetPhases(self.solver, self.phase_buffer, std::ptr::null());
-
-		NvFlexMap(self.phase_buffer, eNvFlexMapWait) as *mut i32
-	}
-
-	/// # Safety
-	/// This function must be followed by a proper release, through self.unmap(), as this calls NvFlexMap
 	pub unsafe fn get(&self) -> Option<Vec<Particle>> {
-		let particles = self.get_particles();
-		let velocities = self.get_velocities();
-		let phases = self.get_phases();
+		self.particles.get(self.solver)
+	}
 
-		let mut pvec = vec![];
-		for i in 0..self.nactive as isize {
-			let particle = particles.offset(i);
-			if particle.is_null() {
-				break;
-			}
-
-			let velocity = velocities.offset(i);
-			let phase = phases.offset(i);
-
-			pvec.push(Particle {
-				pdata: particle.as_ref()?,
-				velocity: velocity.as_ref()?,
-				phase: phase.as_ref()?,
-			});
+	pub fn unmap(&self) {
+		unsafe {
+			self.particles.unmap();
+			self.geometry.unmap();
 		}
-
-		Some(pvec)
 	}
 }
 
-impl<'a> Drop for FlexState<'a> {
+impl Drop for FlexState {
 	/// Consumes the FlexState, properly releasing allocated resources.
 	fn drop(&mut self) {
 		unsafe {
-			NvFlexFreeBuffer(self.particle_buffer);
-			NvFlexFreeBuffer(self.phase_buffer);
-			NvFlexFreeBuffer(self.velocity_buffer);
-			NvFlexFreeBuffer(self.active_buffer);
 			NvFlexDestroySolver(self.solver);
 			NvFlexShutdown(self.lib);
 		}

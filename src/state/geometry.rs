@@ -6,11 +6,9 @@ use crate::{
 	types::{Quat, Vector3, Vector4},
 };
 
-use derivative::Derivative;
-
 use super::FlexState;
 
-#[derive(Derivative)]
+#[derive(derivative::Derivative)]
 #[derivative(Debug)]
 pub struct GeometryState {
 	#[derivative(Debug = "ignore")]
@@ -133,6 +131,15 @@ impl GeometryState {
 
 			flags.offset(count).write(flag);
 
+			self.unmap();
+		}
+
+		self.count += 1;
+		self.has_changes = true;
+	}
+
+	pub fn unmap(&self) {
+		unsafe {
 			NvFlexUnmap(self.buffer);
 			NvFlexUnmap(self.positions);
 			NvFlexUnmap(self.rotations);
@@ -140,9 +147,6 @@ impl GeometryState {
 			NvFlexUnmap(self.previous_rotations);
 			NvFlexUnmap(self.flags);
 		}
-
-		self.count += 1;
-		self.has_changes = true;
 	}
 
 	/// Pushes shape changes to the FleX state
