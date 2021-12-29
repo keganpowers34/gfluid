@@ -1,0 +1,17 @@
+[package]
+name = "gfluid"
+version = "0.1.0"
+authors = ["Vurv78 <vurvdevelops@gmail.com>"]
+edition = "2021"
+publish = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rglua = "1.0.0"
+nvflex-sys = { version = "0.3.0", git = "https://github.com/Vurv78/nvflex-sys" }
+
+derivative = "2.2.0"
+thiserror = "1.0.30"
